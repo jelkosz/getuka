@@ -157,7 +157,6 @@ def do_synchronize(relation):
     managed_task_ids = [kanbanik_task[0][0] for kanbanik_task in managed_kanbanik_tasks]
 
     linearized_gerrit_tasks = [item for sublist in load_data_from_gerrit(relation) for item in sublist]
-    # linearized_gerrit_tasks = [task for task in linearized_gerrit_tasks if task[]]
 
     # add new tasks
     to_add = [gerrit_task_to_add_command(gerrit_task) for gerrit_task in linearized_gerrit_tasks if gerrit_task['id'] not in managed_task_ids]
@@ -179,6 +178,7 @@ if __name__ == "__main__":
 
     try:
         do_synchronize('owner')
+        # not yet implemented
         # do_synchronize('reviewer')
     finally:
         execute_kanbanik_command({'commandName': 'logout', 'sessionId': sessionId})
