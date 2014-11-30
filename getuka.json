@@ -1,0 +1,57 @@
+{
+    "gerrit": {
+        "url":"gerritUrl",
+        "users": [
+            "gerritUser1",
+            "gerritUser2"
+        ]
+    },
+
+    "kanbanik": {
+        "url": "http://kanbanikUrl:8080/kanbanik/api",
+        "user": "",
+        "password": "",
+        "projectId": "",
+        "boardId": ""
+    },
+
+    "gerrit2kanbanikMappings": {
+        "status2classOfServiceMapping":  {
+            "DRAFT": "",
+            "default": ""
+        },
+
+        "user2kanbanikUser": {
+            "Whole Name": "kanbanikUserName",
+            "default": "unknownUser"
+        },
+
+        "owner": {
+            "branch2workflowitemMapping": {
+                "master": "",
+                "otherBranch": "",
+                "default": ""
+            },
+
+            "workflowitem2doneMapping": {
+                "": "",
+                "": "",
+                "default": ""
+            }
+        },
+        "reviewer": {
+            "branch2workflowitemMapping": {
+                "master": "",
+                "otherBarnch": "",
+                "default": ""
+            },
+
+            "workflowitem2doneMapping": {
+                "": "",
+                "": "",
+                "default": ""
+            }
+        }
+    }
+
+}
