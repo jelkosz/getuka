@@ -1,12 +1,14 @@
 import requests
 import json
 import re
+import os.path
+import urllib
 
 sessionId = ''
 config = {}
 
 OK_STATUS = 200
-ERROR_STATUS= 452
+ERROR_STATUS = 452
 USER_NOT_LOGGED_IN_STATUS = 453
 
 
@@ -72,6 +74,25 @@ def add_assignee(kanbanik, gerrit):
     kanbanik['assignee'] = {'userName': name, 'realName': 'fake', 'pictureUrl': 'fake', 'sessionId': 'fake', 'version': 1}
 
 
+def add_tags(kanbanik, gerrit):
+    url = config['gerrit']['url'] + '/' + str(gerrit['_number'])
+    kanbanik['taskTags'] = [{'name': 'G', 'description': 'Gerrit Link', 'onClickUrl': url, 'onClickTarget': 1, 'colour': 'green'}]
+    add_labels_as_tags(kanbanik, gerrit, 'Verified', 'V:')
+    add_labels_as_tags(kanbanik, gerrit, 'Code-Review', 'CR:')
+
+def add_labels_as_tags(kanbanik, gerrit, label_in_json, label):
+    if label_in_json not in gerrit['labels']:
+        return
+
+    verifiedLabels = gerrit['labels'][label_in_json]['all']
+    for verifiedLabel in verifiedLabels:
+        if verifiedLabel['value'] != 0:
+            color = 'green'
+            if verifiedLabel['value'] < 0:
+                color = 'red'
+            kanbanik['taskTags'].append([{'name': 'Verified', 'description': label + " " + verifiedLabel['name'] + ': ' + str(verifiedLabel['value']), 'colour': color}])
+
+
 def to_class_of_service(gerrit):
     id = find_mapping_with_default(config['gerrit2kanbanikMappings']['status2classOfServiceMapping'], gerrit['status'])
     return {'id': id, 'name': 'fake', 'description': 'fake', 'colour': 'fake', 'version': 1},
@@ -81,8 +102,8 @@ def to_workflowitem_id(gerrit):
     return find_mapping_with_default(config['gerrit2kanbanikMappings']['owner']['branch2workflowitemMapping'], gerrit['branch'])
 
 
-def gerrit_task_to_edit_command(gerrit, managed_kanbanik_tasks):
-    corrsponding_task = find_changed_task(gerrit, managed_kanbanik_tasks)
+def gerrit_task_to_edit_command(gerrit, managed_kanbanik_tasks, force_update):
+    corrsponding_task = find_changed_task(gerrit, managed_kanbanik_tasks, force_update)
     edit_task = as_kanbanik_task(gerrit)
     edit_task['commandName'] = 'editTask'
     edit_task['id'] = corrsponding_task['id']
@@ -107,7 +128,7 @@ def gerrit_task_to_edit_command(gerrit, managed_kanbanik_tasks):
 
 def as_kanbanik_task(gerrit):
     res = {
-       'name': gerrit['subject'],
+       'name': sanitize_string(gerrit['subject']),
        'description': '$GERRIT-ID;'+ gerrit['id']  +';TIMESTAMP;'+ gerrit['updated'] +'$',
        'workflowitemId': to_workflowitem_id(gerrit),
        'version':1,
@@ -119,6 +140,7 @@ def as_kanbanik_task(gerrit):
     }
 
     add_assignee(res, gerrit)
+    add_tags(res, gerrit)
 
     return res
 
@@ -140,16 +162,16 @@ def move_kanbanik_to_unknown(kanbanik):
     }
 
 
-def find_changed_task(gerrit_task, managed_kanbanik_tasks):
+def find_changed_task(gerrit_task, managed_kanbanik_tasks, force_update):
     for kanbanik_task in managed_kanbanik_tasks:
-        if kanbanik_task[0][0] == gerrit_task['id'] and kanbanik_task[0][1] != gerrit_task['updated']:
+        if kanbanik_task[0][0] == gerrit_task['id'] and (kanbanik_task[0][1] != gerrit_task['updated'] or force_update):
             return kanbanik_task[1]
         elif kanbanik_task[0][0] == gerrit_task['id']:
             return None
     return None
 
 
-def do_synchronize(relation):
+def do_synchronize(relation, force_update = False):
     loaded = load_data_from_kanbanik()
     kanbanik_tasks = [(parse_metadata_from_kanbanik(task.get('description', '')), task) for task in loaded]
 
@@ -164,7 +186,7 @@ def do_synchronize(relation):
         execute_kanbanik_command(task_to_add)
 
     # update existing
-    to_edit = [gerrit_task_to_edit_command(gerrit_task, managed_kanbanik_tasks) for gerrit_task in linearized_gerrit_tasks if find_changed_task(gerrit_task, managed_kanbanik_tasks) is not None]
+    to_edit = [gerrit_task_to_edit_command(gerrit_task, managed_kanbanik_tasks, force_update) for gerrit_task in linearized_gerrit_tasks if find_changed_task(gerrit_task, managed_kanbanik_tasks, force_update) is not None]
     for task_to_edit in to_edit:
         for one_command in task_to_edit:
             execute_kanbanik_command(one_command)
@@ -173,12 +195,33 @@ def do_synchronize(relation):
     gerrit_task_ids = [gerrit_task['id'] for gerrit_task in linearized_gerrit_tasks]
     [execute_kanbanik_command(move_kanbanik_to_unknown(kanbanik_task)) for kanbanik_task in managed_kanbanik_tasks if kanbanik_task[0][0] not in gerrit_task_ids]
 
+
+def sanitize_string(s):
+    without_non_ascii = "".join(i for i in s if ord(i)<128)
+    with_correct_enters = "<br>".join(without_non_ascii.split("\n"))
+    without_json_special_chars = re.sub(r'"', '\'', with_correct_enters)
+    return urllib.quote_plus(without_json_special_chars)
+
+
 if __name__ == "__main__":
+    lock_file_path = '/tmp/getuka.lock'
+    if not os.path.isfile(lock_file_path):
+        open(lock_file_path, 'w+')
+    else:
+        raise Exception("The lock file already exists at " + lock_file_path + ' - if you are sure no other instance of getuka is running, please delete it and run getuka again.')
+
     initialize()
 
     try:
-        do_synchronize('owner')
+        pass
+        do_synchronize('owner', True)
         # not yet implemented
         # do_synchronize('reviewer')
     finally:
-        execute_kanbanik_command({'commandName': 'logout', 'sessionId': sessionId})
+        try:
+            execute_kanbanik_command({'commandName': 'logout', 'sessionId': sessionId})
+        finally:
+            os.remove(lock_file_path)
+
+
+# wget http://gerrit.ovirt.org/changes/?q=status:open&reviewer:tjelinek@redhat.com&o=DETAILED_LABELS&o=MESSAGES&q=status:open&reviewer:ofrenkel@redhat.com&o=DETAILED_LABELS&o=MESSAGES
