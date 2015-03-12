@@ -3,6 +3,8 @@ import json
 import re
 import os.path
 import urllib
+import logging
+import hashlib
 
 sessionId = ''
 config = {}
@@ -13,10 +15,16 @@ USER_NOT_LOGGED_IN_STATUS = 453
 
 
 def load_data_from_gerrit(relation):
-    r = '&'.join(['q=status:open%20'+relation+':'+user+'&o=DETAILED_LABELS&o=MESSAGES' for user in config['gerrit']['users']])
-    query = config['gerrit']['url'] + '/changes/?' + r
-    resp = requests.get(query)
-    return json.loads(resp.content[5:])
+    try:
+        r = '&'.join(['q=status:open%20'+relation+':'+user+'&o=DETAILED_LABELS&o=MESSAGES' for user in config['gerrit']['users']])
+        query = config['gerrit']['url'] + '/changes/?' + r
+        resp = requests.get(query)
+        return json.loads(resp.content[5:])
+    except:
+        logging.error("error while calling gerrit")
+        logging.error("request: " + str(query))
+        logging.error("response: " + str(resp))
+        return None
 
 
 def execute_kanbanik_command(json_data):
@@ -31,7 +39,10 @@ def execute_kanbanik_command(json_data):
         return resp.json()
 
     if resp.status_code == ERROR_STATUS or resp.status_code == USER_NOT_LOGGED_IN_STATUS:
-        raise Exception('Error while calling server. Status code: '+ str(resp.status_code) + '. Resp: ' + resp.text)
+        logging.error("error while calling kanbanik")
+        logging.error("response: " + str(resp.status_code))
+        logging.error("request: " + str(json_data))
+        return None
 
 
 def load_data_from_kanbanik():
@@ -74,24 +85,42 @@ def add_assignee(kanbanik, gerrit):
     kanbanik['assignee'] = {'userName': name, 'realName': 'fake', 'pictureUrl': 'fake', 'sessionId': 'fake', 'version': 1}
 
 
+def add_topic_as_tag(kanbanik, gerrit):
+    if 'topic' not in gerrit:
+        return
+
+    topic = gerrit['topic']
+    color = '#' + str(hashlib.sha224(topic).hexdigest()[:6])
+    kanbanik['taskTags'].append([{'name': topic, 'description': topic, 'colour': color}])
+
+
 def add_tags(kanbanik, gerrit):
     url = config['gerrit']['url'] + '/' + str(gerrit['_number'])
     kanbanik['taskTags'] = [{'name': 'G', 'description': 'Gerrit Link', 'onClickUrl': url, 'onClickTarget': 1, 'colour': 'green'}]
     add_labels_as_tags(kanbanik, gerrit, 'Verified', 'V:')
     add_labels_as_tags(kanbanik, gerrit, 'Code-Review', 'CR:')
+    add_topic_as_tag(kanbanik, gerrit)
 
 def add_labels_as_tags(kanbanik, gerrit, label_in_json, label):
-    if label_in_json not in gerrit['labels']:
+    values = find_labels_values(gerrit, label_in_json)
+    if values is None:
         return
 
-    verifiedLabels = gerrit['labels'][label_in_json]['all']
-    for verifiedLabel in verifiedLabels:
-        if verifiedLabel['value'] != 0:
+    for name, value in values:
+        if value != 0:
             color = 'green'
-            if verifiedLabel['value'] < 0:
+            if value < 0:
                 color = 'red'
-            kanbanik['taskTags'].append([{'name': 'Verified', 'description': label + " " + verifiedLabel['name'] + ': ' + str(verifiedLabel['value']), 'colour': color}])
+            kanbanik['taskTags'].append([{'name': label_in_json + str(value), 'description': label + " " + name + ': ' + str(value), 'colour': color}])
 
+
+def find_labels_values(gerrit, label_in_json):
+    if label_in_json not in gerrit['labels']:
+        return None
+
+    labels = gerrit['labels'][label_in_json]['all']
+
+    return [(label['name'], label['value']) for label in labels]
 
 def to_class_of_service(gerrit):
     id = find_mapping_with_default(config['gerrit2kanbanikMappings']['status2classOfServiceMapping'], gerrit['status'])
@@ -99,8 +128,29 @@ def to_class_of_service(gerrit):
 
 
 def to_workflowitem_id(gerrit):
-    return find_mapping_with_default(config['gerrit2kanbanikMappings']['owner']['branch2workflowitemMapping'], gerrit['branch'])
+    mapping = 'branch2workflowitemMapping'
+    if can_be_merged(gerrit):
+        mapping = 'workflowitem2mergeReadyMapping'
 
+    return find_mapping_with_default(config['gerrit2kanbanikMappings']['owner'][mapping], gerrit['branch'])
+
+
+def can_be_merged(gerrit):
+    code_reviewed = False
+
+    for name, value in find_labels_values(gerrit, 'Code-Review'):
+        if value == 2:
+            code_reviewed = True
+            break
+
+    if not code_reviewed:
+        return False
+
+    for name, value in find_labels_values(gerrit, 'Verified'):
+        if value == 1:
+            return True
+
+    return False
 
 def gerrit_task_to_edit_command(gerrit, managed_kanbanik_tasks, force_update):
     corrsponding_task = find_changed_task(gerrit, managed_kanbanik_tasks, force_update)
@@ -205,16 +255,22 @@ def sanitize_string(s):
 
 if __name__ == "__main__":
     lock_file_path = '/tmp/getuka.lock'
+    logging.basicConfig(filename='/var/log/getuka.log',level=logging.DEBUG)
+    logging.info("getuka started")
+
     if not os.path.isfile(lock_file_path):
         open(lock_file_path, 'w+')
     else:
-        raise Exception("The lock file already exists at " + lock_file_path + ' - if you are sure no other instance of getuka is running, please delete it and run getuka again.')
+        msg = "The lock file already exists at " + lock_file_path + ' - if you are sure no other instance of getuka is running, please delete it and run getuka again.'
+        logging.error(msg)
+        raise Exception(msg)
 
     initialize()
 
     try:
-        pass
-        do_synchronize('owner', True)
+        logging.info("going to process")
+        do_synchronize('owner', False)
+        logging.info("process ended successfully")
         # not yet implemented
         # do_synchronize('reviewer')
     finally:
@@ -222,6 +278,5 @@ if __name__ == "__main__":
             execute_kanbanik_command({'commandName': 'logout', 'sessionId': sessionId})
         finally:
             os.remove(lock_file_path)
-
 
 # wget http://gerrit.ovirt.org/changes/?q=status:open&reviewer:tjelinek@redhat.com&o=DETAILED_LABELS&o=MESSAGES&q=status:open&reviewer:ofrenkel@redhat.com&o=DETAILED_LABELS&o=MESSAGES

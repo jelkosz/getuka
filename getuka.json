@@ -32,6 +32,11 @@
                 "otherBranch": "",
                 "default": ""
             },
+            "workflowitem2mergeReadyMapping": {
+                "master": "",
+                "otherBranch": "",
+                "default": ""
+            },
 
             "workflowitem2doneMapping": {
                 "": "",
