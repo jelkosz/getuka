@@ -107,6 +107,9 @@ def add_labels_as_tags(kanbanik, gerrit, label_in_json, label):
         return
 
     for name, value in values:
+        if name is None or value is None:
+            continue
+
         if value != 0:
             color = 'green'
             if value < 0:
@@ -120,7 +123,14 @@ def find_labels_values(gerrit, label_in_json):
 
     labels = gerrit['labels'][label_in_json]['all']
 
-    return [(label['name'], label['value']) for label in labels]
+    return [extract_tuple_from_label(label) for label in labels]
+
+def extract_tuple_from_label(label):
+    if 'name' in label and 'value' in label:
+        return (label['name'], label['value'])
+    else:
+        # ignore - unsupported
+        return (None, None)
 
 def to_class_of_service(gerrit):
     id = find_mapping_with_default(config['gerrit2kanbanikMappings']['status2classOfServiceMapping'], gerrit['status'])
