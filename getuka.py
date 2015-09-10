@@ -99,6 +99,7 @@ def add_tags(kanbanik, gerrit):
     kanbanik['taskTags'] = [{'name': 'G', 'description': 'Gerrit Link', 'onClickUrl': url, 'onClickTarget': 1, 'colour': 'green'}]
     add_labels_as_tags(kanbanik, gerrit, 'Verified', 'V:')
     add_labels_as_tags(kanbanik, gerrit, 'Code-Review', 'CR:')
+    add_labels_as_tags(kanbanik, gerrit, 'Continuous-Integration', 'CI:')
     add_topic_as_tag(kanbanik, gerrit)
 
 def add_labels_as_tags(kanbanik, gerrit, label_in_json, label):
@@ -147,6 +148,8 @@ def to_workflowitem_id(gerrit):
 
 def can_be_merged(gerrit):
     code_reviewed = False
+    verifyed = False
+    continues_integration_passed = False
 
     for name, value in find_labels_values(gerrit, 'Code-Review'):
         if value == 2:
@@ -158,9 +161,18 @@ def can_be_merged(gerrit):
 
     for name, value in find_labels_values(gerrit, 'Verified'):
         if value == 1:
-            return True
+            verifyed = True
+            break
 
-    return False
+    if not verifyed:
+        return False
+
+    for name, value in find_labels_values(gerrit, 'Continuous-Integration'):
+        if value == 1:
+            continues_integration_passed = True
+            break
+
+    return continues_integration_passed
 
 def gerrit_task_to_edit_command(gerrit, managed_kanbanik_tasks, force_update):
     corrsponding_task = find_changed_task(gerrit, managed_kanbanik_tasks, force_update)
