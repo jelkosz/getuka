@@ -5,6 +5,7 @@ import os.path
 import urllib
 import logging
 import hashlib
+import sys
 
 sessionId = ''
 config = {}
@@ -57,11 +58,11 @@ def parse_metadata_from_kanbanik(text):
         return '', ''
 
 
-def initialize():
+def initialize(config_file):
     global sessionId
     global config
 
-    with open('/etc/getuka/getuka.json') as data_file:
+    with open(config_file) as data_file:
         config = json.load(data_file)
 
     sessionId = execute_kanbanik_command({'commandName':'login','userName': config['kanbanik']['user'] ,'password': config['kanbanik']['password']})['sessionId']
@@ -275,7 +276,15 @@ def sanitize_string(s):
     return urllib.quote_plus(without_json_special_chars)
 
 
+def read_opts(argv):
+    if len(argv) == 1:
+        return argv[0]
+    else:
+        return '/etc/getuka/getuka.json'
+
 if __name__ == "__main__":
+    config_file = read_opts(sys.argv[1:])
+
     lock_file_path = '/tmp/getuka.lock'
     logging.basicConfig(filename='/var/log/getuka.log',level=logging.DEBUG)
     logging.info("getuka started")
@@ -287,7 +296,7 @@ if __name__ == "__main__":
         logging.error(msg)
         raise Exception(msg)
 
-    initialize()
+    initialize(config_file)
 
     try:
         logging.info("going to process")
@@ -301,4 +310,3 @@ if __name__ == "__main__":
         finally:
             os.remove(lock_file_path)
 
-# wget http://gerrit.ovirt.org/changes/?q=status:open&reviewer:tjelinek@redhat.com&o=DETAILED_LABELS&o=MESSAGES&q=status:open&reviewer:ofrenkel@redhat.com&o=DETAILED_LABELS&o=MESSAGES
