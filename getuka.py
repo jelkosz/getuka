@@ -35,7 +35,7 @@ def _load_recursive(slice, res):
 
 def _load_data_from_gerrit(users):
     try:
-        r = '&'.join(['q=status:open%20owner:'+user+'&o=DETAILED_LABELS&o=COMMIT_FOOTERS&o=CURRENT_COMMIT&o=CURRENT_REVISION' for user in users])
+        r = '&'.join(['q=owner:'+user+'&o=DETAILED_LABELS&o=COMMIT_FOOTERS&o=CURRENT_COMMIT&o=CURRENT_REVISION' for user in users]) + '&n=100'
         query = config['gerrit']['url'] + '/changes/?' + r
         resp = requests.get(query)
         return [item for sublist in json.loads(resp.content[5:]) for item in sublist]
@@ -327,34 +327,46 @@ def gerrit_score_as_string(gerrit, label):
 
 
 # returns true if something has changed, otherwise false
+def get_tag_color(ciscore, color, cscore, gerrit, vscore):
+    if gerrit['status'] == u'MERGED':
+        color = 'teal'
+    else:
+        if vscore == 0:
+            color = 'orange'
+        elif vscore == -1:
+            color = 'red'
+
+        if color == 'green':
+            if cscore == 0 or cscore == 1:
+                color = 'orange'
+            elif cscore < 0:
+                color = 'red'
+        elif color == 'orange':
+            if cscore < 0:
+                color = 'red'
+
+        if color == 'green':
+            if ciscore == 0:
+                color = 'orange'
+            elif ciscore == -1:
+                color = 'red'
+        elif color == 'orange':
+            if ciscore == -1:
+                color = 'red'
+    return color
+
+
 def edit_tags(kanbanik_task, change_id, gerrits):
     names = ['xg: %i' % len(gerrits)]
     description = [change_id + ': ']
 
     color = 'green'
     for gerrit in gerrits:
-        verified, score = gerrit_score_as_string(gerrit, 'Verified')
-        if score == 0:
-            color = 'orange'
-        elif color == -1:
-            color = 'red'
+        verified, vscore = gerrit_score_as_string(gerrit, 'Verified')
+        cr, cscore = gerrit_score_as_string(gerrit, 'Code-Review')
+        ci, ciscore = gerrit_score_as_string(gerrit, 'Continuous-Integration')
 
-        cr, score = gerrit_score_as_string(gerrit, 'Code-Review')
-        if color == 'green':
-            if score == 0 or score == 1:
-                color = 'orange'
-            elif score < 0:
-                color = 'red'
-        elif color == 'orange':
-            if score < 0:
-                color = 'red'
-
-        ci, score = gerrit_score_as_string(gerrit, 'Continuous-Integration')
-        if color == 'green':
-            if score == 0:
-                color = 'orange'
-            elif score == -1:
-                color = 'red'
+        color = get_tag_color(ciscore, color, cscore, gerrit, vscore)
 
         scores_string = '(v: %s, cr: %s, ci: %s)' % (verified, cr, ci)
         names.append(scores_string)
