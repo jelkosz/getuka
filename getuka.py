@@ -14,18 +14,36 @@ OK_STATUS = 200
 ERROR_STATUS = 452
 USER_NOT_LOGGED_IN_STATUS = 453
 
+# needed since gerrit has a limit for query to 10 so this part has to be sliced
+GERRIT_NUM_OF_USERS_SLICE = 5
 
-def load_data_from_gerrit(relation):
+def load_data_from_gerrit():
+    res = []
+    _load_recursive(config['gerrit']['users'], res)
+    return res
+
+
+def _load_recursive(slice, res):
+    if len(slice) > GERRIT_NUM_OF_USERS_SLICE:
+        for sliceres in _load_data_from_gerrit(slice[0: GERRIT_NUM_OF_USERS_SLICE]):
+            res.append(sliceres)
+        _load_recursive(slice[GERRIT_NUM_OF_USERS_SLICE:], res)
+    else:
+        for sliceres in _load_data_from_gerrit(slice):
+            res.append(sliceres)
+
+
+def _load_data_from_gerrit(users):
     try:
-        r = '&'.join(['q=status:open%20'+relation+':'+user+'&o=DETAILED_LABELS&o=MESSAGES' for user in config['gerrit']['users']])
+        r = '&'.join(['q=status:open%20owner:'+user+'&o=DETAILED_LABELS&o=COMMIT_FOOTERS&o=CURRENT_COMMIT&o=CURRENT_REVISION' for user in users])
         query = config['gerrit']['url'] + '/changes/?' + r
         resp = requests.get(query)
-        return json.loads(resp.content[5:])
+        return [item for sublist in json.loads(resp.content[5:]) for item in sublist]
     except:
         logging.error("error while calling gerrit")
         logging.error("request: " + str(query))
         logging.error("response: " + str(resp))
-        return None
+        raise Exception('Error while communicating with gerrit, please see logs for more details')
 
 
 def execute_kanbanik_command(json_data):
@@ -43,7 +61,7 @@ def execute_kanbanik_command(json_data):
         logging.error("error while calling kanbanik")
         logging.error("response: " + str(resp.status_code))
         logging.error("request: " + str(json_data))
-        return None
+        raise Exception('Error communicating with kanbanik - please see logs for more details')
 
 
 def load_data_from_kanbanik():
@@ -103,6 +121,7 @@ def add_tags(kanbanik, gerrit):
     add_labels_as_tags(kanbanik, gerrit, 'Continuous-Integration', 'CI:')
     add_topic_as_tag(kanbanik, gerrit)
 
+# todo during some cleanup this will anyway be removed
 def add_labels_as_tags(kanbanik, gerrit, label_in_json, label):
     values = find_labels_values(gerrit, label_in_json)
     if values is None:
@@ -119,6 +138,13 @@ def add_labels_as_tags(kanbanik, gerrit, label_in_json, label):
             kanbanik['taskTags'].append([{'name': label_in_json + str(value), 'description': label + " " + name + ': ' + str(value), 'colour': color}])
 
 
+def get_gerrit_score(gerrit, label_in_json):
+    values = find_labels_values(gerrit, label_in_json)
+    if values is None:
+        return []
+
+    return [value for value in values if value is not None]
+
 def find_labels_values(gerrit, label_in_json):
     if label_in_json not in gerrit['labels']:
         return None
@@ -128,11 +154,11 @@ def find_labels_values(gerrit, label_in_json):
     return [extract_tuple_from_label(label) for label in labels]
 
 def extract_tuple_from_label(label):
-    if 'name' in label and 'value' in label:
-        return (label['name'], label['value'])
+    if 'value' in label:
+        return label['value']
     else:
         # ignore - unsupported
-        return (None, None)
+        return None
 
 def to_class_of_service(gerrit):
     id = find_mapping_with_default(config['gerrit2kanbanikMappings']['status2classOfServiceMapping'], gerrit['status'])
@@ -204,7 +230,7 @@ def as_kanbanik_task(gerrit):
        'name': sanitize_string(gerrit['subject']),
        'description': '$GERRIT-ID;'+ gerrit['id']  +';TIMESTAMP;'+ gerrit['updated'] +'$',
        'workflowitemId': to_workflowitem_id(gerrit),
-       'version':1,
+       'version': 1,
        'projectId': config['kanbanik']['projectId'],
        'boardId': config['kanbanik']['boardId'],
        'classOfService': to_class_of_service(gerrit),
@@ -244,14 +270,158 @@ def find_changed_task(gerrit_task, managed_kanbanik_tasks, force_update):
     return None
 
 
-def do_synchronize(relation, force_update = False):
+def parse_bz_ids_from_gerrit_commit(msg):
+    match_obj = re.findall('.*Bug-Url.*[=//]([0-9]+).*\n', msg, re.I|re.MULTILINE)
+    return [res for res in match_obj]
+
+
+def parse_change_id_from_gerrit_commit(msg):
+    match_obj = re.findall('.*Change-Id: (.*)\n', msg, re.I|re.MULTILINE)
+    return [res for res in match_obj]
+
+
+def parse_provided_ids_from_gerrit_task(gerrit_task, id_parser):
+    try:
+        msg = gerrit_task['revisions'].values()[0]['commit']['message']
+        return id_parser(msg)
+    except:
+        return []
+
+    return []
+
+
+#returns {provided_id -> [gerrit tasks]}
+def parse_provided_id_from_gerrit_tasks(gerrit_tasks, id_provider, parser):
+    res = {}
+    for task in gerrit_tasks:
+        for bz_id in id_provider(task, parser):
+            if bz_id not in res:
+                res[bz_id] = []
+
+            res[bz_id].append(task)
+    return res
+
+
+def as_bzid_to_kanbanik_task(kanbanik_tasks):
+    res = {}
+    for kanbanik_task in kanbanik_tasks:
+        for tag in kanbanik_task['taskTags']:
+            if tag['name'].startswith('xbz:'):
+                res[tag['name'][4:]] = kanbanik_task
+                break
+
+    return res
+
+# ([scores as string], most important score)
+def gerrit_score_as_string(gerrit, label):
+    scores = [score for score in get_gerrit_score(gerrit, label)]
+    cleared_scores = [str(score) for score in scores if score != 0]
+    if len(cleared_scores) == 0:
+        return '0', 0
+    else:
+        min_score = min(scores)
+        if min_score < 0:
+            return ', '.join(cleared_scores), min_score
+        else:
+            return ', '.join(cleared_scores), max(scores)
+
+
+# returns true if something has changed, otherwise false
+def edit_tags(kanbanik_task, change_id, gerrits):
+    names = ['xg: %i' % len(gerrits)]
+    description = [change_id + ': ']
+
+    color = 'green'
+    for gerrit in gerrits:
+        verified, score = gerrit_score_as_string(gerrit, 'Verified')
+        if score == 0:
+            color = 'orange'
+        elif color == -1:
+            color = 'red'
+
+        cr, score = gerrit_score_as_string(gerrit, 'Code-Review')
+        if color == 'green':
+            if score == 0 or score == 1:
+                color = 'orange'
+            elif score < 0:
+                color = 'red'
+        elif color == 'orange':
+            if score < 0:
+                color = 'red'
+
+        ci, score = gerrit_score_as_string(gerrit, 'Continuous-Integration')
+        if color == 'green':
+            if score == 0:
+                color = 'orange'
+            elif score == -1:
+                color = 'red'
+
+        scores_string = '(v: %s, cr: %s, ci: %s)' % (verified, cr, ci)
+        names.append(scores_string)
+        description.append(str(gerrit['_number']) + '->' + scores_string + ', ')
+
+    name = ' '.join(names)
+    url = config['gerrit']['url'] + '/#/q/' + change_id
+
+    new_tag = {'name': name, 'description': ''.join(description), 'onClickUrl': url, 'onClickTarget': 1, 'colour': color}
+
+    new_tags = []
+    add_needed = True
+    update_kanbanik = False
+    for tag in kanbanik_task['taskTags']:
+        if tag['description'].startswith(change_id + ':'):
+            add_needed = False
+
+            if new_tag == tag:
+                return False
+            else:
+                new_tags.append(new_tag)
+                update_kanbanik = True
+
+        else:
+            new_tags.append(tag)
+
+    if add_needed:
+        update_kanbanik = True
+        new_tags.append(new_tag)
+
+    kanbanik_task['taskTags'] = new_tags
+
+    return update_kanbanik
+
+def do_synchronize_with_bz(force_update = False):
+    kanbanik_tasks = load_data_from_kanbanik()
+    gerri_data = load_data_from_gerrit()
+    bz_to_gerrit_tasks = parse_provided_id_from_gerrit_tasks(gerri_data, parse_provided_ids_from_gerrit_task, parse_bz_ids_from_gerrit_commit)
+    bzid_to_kanbanik_task = as_bzid_to_kanbanik_task(kanbanik_tasks)
+
+    for bz_id, gerrit_tasks in bz_to_gerrit_tasks.items():
+        if bz_id not in bzid_to_kanbanik_task:
+            continue
+
+        kanbanik_task = bzid_to_kanbanik_task[bz_id]
+        gerrit_groupped_by_changeid = parse_provided_id_from_gerrit_tasks(gerrit_tasks, parse_provided_ids_from_gerrit_task, parse_change_id_from_gerrit_commit)
+        to_update = False
+        for change_id, gerrit_tasks in gerrit_groupped_by_changeid.items():
+            if edit_tags(kanbanik_task, change_id, gerrit_tasks):
+                to_update = True
+
+        # if at least one change happened
+        if to_update:
+            kanbanik_task['description'] = sanitize_string(kanbanik_task['description'])
+            kanbanik_task['commandName'] = 'editTask'
+            kanbanik_task['sessionId'] = sessionId
+            execute_kanbanik_command(kanbanik_task)
+
+
+def do_synchronize(force_update = False):
     loaded = load_data_from_kanbanik()
     kanbanik_tasks = [(parse_metadata_from_kanbanik(task.get('description', '')), task) for task in loaded]
 
     managed_kanbanik_tasks = filter(lambda x: x[0] != ('', ''), kanbanik_tasks)
     managed_task_ids = [kanbanik_task[0][0] for kanbanik_task in managed_kanbanik_tasks]
 
-    linearized_gerrit_tasks = [item for sublist in load_data_from_gerrit(relation) for item in sublist]
+    linearized_gerrit_tasks = load_data_from_gerrit()
 
     # add new tasks
     to_add = [gerrit_task_to_add_command(gerrit_task) for gerrit_task in linearized_gerrit_tasks if gerrit_task['id'] not in managed_task_ids]
@@ -300,10 +470,8 @@ if __name__ == "__main__":
 
     try:
         logging.info("going to process")
-        do_synchronize('owner', False)
+        do_synchronize_with_bz(False)
         logging.info("process ended successfully")
-        # not yet implemented
-        # do_synchronize('reviewer')
     finally:
         try:
             execute_kanbanik_command({'commandName': 'logout', 'sessionId': sessionId})
