@@ -6,6 +6,7 @@ import urllib
 import logging
 import hashlib
 import sys
+import getopt
 
 sessionId = ''
 config = {}
@@ -15,7 +16,7 @@ ERROR_STATUS = 452
 USER_NOT_LOGGED_IN_STATUS = 453
 
 # needed since gerrit has a limit for query to 10 so this part has to be sliced
-GERRIT_NUM_OF_USERS_SLICE = 5
+GERRIT_NUM_OF_USERS_SLICE = 3
 
 def load_data_from_gerrit():
     res = []
@@ -76,13 +77,16 @@ def parse_metadata_from_kanbanik(text):
         return '', ''
 
 
-def initialize(config_file):
+def initialize(config_file, kanbanik_pass):
     global sessionId
     global config
 
     with open(config_file) as data_file:
         config = json.load(data_file)
 
+    if kanbanik_pass is not None:
+        config['kanbanik']['password'] = kanbanik_pass
+    
     sessionId = execute_kanbanik_command({'commandName':'login','userName': config['kanbanik']['user'] ,'password': config['kanbanik']['password']})['sessionId']
 
 
@@ -328,7 +332,7 @@ def gerrit_score_as_string(gerrit, label):
 
 # returns true if something has changed, otherwise false
 def get_tag_color(ciscore, color, cscore, gerrit, vscore):
-    if gerrit['status'] == u'MERGED':
+    if gerrit['status'] == u'MERGED' or gerrit['status'] == u'ABANDONED':
         color = 'teal'
     else:
         if vscore == 0:
@@ -458,16 +462,7 @@ def sanitize_string(s):
     return urllib.quote_plus(without_json_special_chars)
 
 
-def read_opts(argv):
-    if len(argv) == 1:
-        return argv[0]
-    else:
-        return '/etc/getuka/getuka.json'
-
-if __name__ == "__main__":
-    config_file = read_opts(sys.argv[1:])
-
-    lock_file_path = '/tmp/getuka.lock'
+def synchronize(kanbanik_pass, config_file):
     logging.basicConfig(filename='/var/log/getuka.log',level=logging.DEBUG)
     logging.info("getuka started")
 
@@ -478,7 +473,7 @@ if __name__ == "__main__":
         logging.error(msg)
         raise Exception(msg)
 
-    initialize(config_file)
+    initialize(config_file, kanbanik_pass)
 
     try:
         logging.info("going to process")
@@ -490,3 +485,25 @@ if __name__ == "__main__":
         finally:
             os.remove(lock_file_path)
 
+
+if __name__ == "__main__":
+# ok, the handling of the cmd line is a pain, needs to be fixed soon
+    config_file = None
+    kanbanik_pass = None
+    lock_file_path = '/tmp/getuka.lock'
+
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "hk:c:", ["kanbanikpass=", "config="])
+    except getopt.GetoptError:
+        print 'getuka.py -k <kanbanik password> -c <config file path>'
+        sys.exit(2)
+    for opt, arg in opts:
+        if opt == '-h':
+            print 'getuka.py -k <kanbanik password> -c <config file path>'
+            sys.exit()
+        elif opt in ("-k", "--kanbanikpass"):
+            kanbanik_pass = arg
+        elif opt in ("-c", "--config"):
+            config_file = arg
+
+    synchronize(kanbanik_pass, config_file)
