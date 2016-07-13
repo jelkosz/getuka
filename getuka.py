@@ -463,6 +463,8 @@ def sanitize_string(s):
 
 
 def synchronize(kanbanik_pass, config_file):
+    lock_file_path = '/tmp/getuka.lock'
+
     logging.basicConfig(filename='/var/log/getuka.log',level=logging.DEBUG)
     logging.info("getuka started")
 
@@ -490,7 +492,6 @@ if __name__ == "__main__":
 # ok, the handling of the cmd line is a pain, needs to be fixed soon
     config_file = None
     kanbanik_pass = None
-    lock_file_path = '/tmp/getuka.lock'
 
     try:
         opts, args = getopt.getopt(sys.argv[1:], "hk:c:", ["kanbanikpass=", "config="])
