@@ -4,7 +4,7 @@ import re
 import os.path
 import urllib
 import logging
-import hashlib
+from datetime import datetime
 import sys
 import getopt
 
@@ -18,28 +18,29 @@ USER_NOT_LOGGED_IN_STATUS = 453
 # needed since gerrit has a limit for query to 10 so this part has to be sliced
 GERRIT_NUM_OF_USERS_SLICE = 3
 
-def load_data_from_gerrit():
+def load_data_from_gerrit(relation, slice_size, only_opened):
     res = []
-    _load_recursive(config['gerrit']['users'], res)
+    _load_recursive(config['gerrit']['users'], res, relation, slice_size, only_opened)
     return res
 
 
-def _load_recursive(slice, res):
-    if len(slice) > GERRIT_NUM_OF_USERS_SLICE:
-        for sliceres in _load_data_from_gerrit(slice[0: GERRIT_NUM_OF_USERS_SLICE]):
-            res.append(sliceres)
-        _load_recursive(slice[GERRIT_NUM_OF_USERS_SLICE:], res)
-    else:
-        for sliceres in _load_data_from_gerrit(slice):
-            res.append(sliceres)
+def _load_recursive(slice, res, relation, slice_size, only_opened):
+    res.append(_load_data_from_gerrit(slice[0: slice_size], relation, only_opened))
+    if len(slice) > slice_size:
+        _load_recursive(slice[slice_size:], res, relation, slice_size, only_opened)
 
-
-def _load_data_from_gerrit(users):
+# the relation is either owner or reviewer
+def _load_data_from_gerrit(users, relation, only_opened):
+    additional_params = 'is:open+' if only_opened else ''
     try:
-        r = '&'.join(['q=owner:'+user+'&o=DETAILED_LABELS&o=COMMIT_FOOTERS&o=CURRENT_COMMIT&o=CURRENT_REVISION' for user in users]) + '&n=100'
+        r = '&'.join(['q=' + additional_params + relation + ':'+user+'&o=DETAILED_LABELS&o=COMMIT_FOOTERS&o=CURRENT_COMMIT&o=CURRENT_REVISION' for user in users]) + '&n=100'
         query = config['gerrit']['url'] + '/changes/?' + r
         resp = requests.get(query)
-        return [item for sublist in json.loads(resp.content[5:]) for item in sublist]
+        # because gerrit api returns one list if asked for one user or a list of lists if asked for list of users
+        if len(users) == 1:
+            return (users, json.loads(resp.content[5:]))
+        else:
+            return (users, [item for sublist in json.loads(resp.content[5:]) for item in sublist])
     except:
         logging.error("error while calling gerrit")
         logging.error("request: " + str(query))
@@ -81,13 +82,6 @@ def initialize(config_file, kanbanik_pass):
     
     sessionId = execute_kanbanik_command({'commandName':'login','userName': config['kanbanik']['user'] ,'password': config['kanbanik']['password']})['sessionId']
 
-
-def gerrit_task_to_add_command(gerrit):
-    res = as_kanbanik_task(gerrit)
-    res['commandName'] = 'createTask'
-    return res
-
-
 def find_mapping_with_default(mapping, value):
     res = mapping['default']
     if value in mapping:
@@ -106,37 +100,12 @@ def add_assignee(kanbanik, gerrit):
 
 
 def add_topic_as_tag(kanbanik, gerrit):
-    if 'topic' not in gerrit:
-        return
+    topic = parse_topic_from_gerrit(gerrit)[0]
+    url = config['gerrit']['url'] + '/#/q/topic:' + str(topic)
+    if 'taskTags' not in kanbanik:
+        kanbanik['taskTags'] = []
 
-    topic = gerrit['topic']
-    color = '#' + str(hashlib.sha224(topic).hexdigest()[:6])
-    kanbanik['taskTags'].append([{'name': topic, 'description': topic, 'colour': color}])
-
-
-def add_tags(kanbanik, gerrit):
-    url = config['gerrit']['url'] + '/' + str(gerrit['_number'])
-    kanbanik['taskTags'] = [{'name': 'G', 'description': 'Gerrit Link', 'onClickUrl': url, 'onClickTarget': 1, 'colour': 'green'}]
-    # add_labels_as_tags(kanbanik, gerrit, 'Verified', 'V:')
-    # add_labels_as_tags(kanbanik, gerrit, 'Code-Review', 'CR:')
-    # add_labels_as_tags(kanbanik, gerrit, 'Continuous-Integration', 'CI:')
-    add_topic_as_tag(kanbanik, gerrit)
-
-# todo during some cleanup this will anyway be removed
-def add_labels_as_tags(kanbanik, gerrit, label_in_json, label):
-    values = find_labels_values(gerrit, label_in_json)
-    if values is None:
-        return
-
-    for name, value in values:
-        if name is None or value is None:
-            continue
-
-        if value != 0:
-            color = 'green'
-            if value < 0:
-                color = 'red'
-            kanbanik['taskTags'].append([{'name': label_in_json + str(value), 'description': label + " " + name + ': ' + str(value), 'colour': color}])
+    kanbanik['taskTags'].append({'name': 'xt:' + str(topic), 'description': topic, 'colour': 'Transparent', 'onClickUrl': url})
 
 
 def get_gerrit_score(gerrit, label_in_json):
@@ -145,6 +114,7 @@ def get_gerrit_score(gerrit, label_in_json):
         return []
 
     return [value for value in values if value is not None]
+
 
 def find_labels_values(gerrit, label_in_json):
     if label_in_json not in gerrit['labels']:
@@ -166,14 +136,6 @@ def to_class_of_service(gerrit):
     return {'id': id, 'name': 'fake', 'description': 'fake', 'colour': 'fake', 'version': 1},
 
 
-def to_workflowitem_id(gerrit):
-    mapping = 'branch2workflowitemMapping'
-    if can_be_merged(gerrit):
-        mapping = 'workflowitem2mergeReadyMapping'
-
-    return find_mapping_with_default(config['gerrit2kanbanikMappings']['owner'][mapping], gerrit['branch'])
-
-
 def can_be_merged(gerrit):
     verified, vscore = gerrit_score_as_string(gerrit, 'Verified')
     cr, crcore = gerrit_score_as_string(gerrit, 'Code-Review')
@@ -181,90 +143,22 @@ def can_be_merged(gerrit):
     return crcore == 2 and vscore == 1 and ciscore == 1
 
 
-def gerrit_task_to_edit_command(gerrit, managed_kanbanik_tasks, force_update):
-    corrsponding_task = find_changed_task(gerrit, managed_kanbanik_tasks, force_update)
-    edit_task = as_kanbanik_task(gerrit)
-    edit_task['commandName'] = 'editTask'
-    edit_task['id'] = corrsponding_task['id']
-    edit_task['ticketId'] = corrsponding_task['ticketId']
-    # move explicitly
-    edit_task['workflowitemId'] = corrsponding_task['workflowitemId']
-
-    new_workflowitem = to_workflowitem_id(gerrit)
-    res = [edit_task]
-    if new_workflowitem != corrsponding_task['workflowitemId']:
-        to_move = corrsponding_task.copy()
-        to_move['workflowitemId'] = new_workflowitem
-        to_move['version'] = to_move['version'] + 1
-        res.append({
-            'commandName': 'moveTask',
-            'task': to_move,
-            'sessionId': sessionId
-        })
-
-    return res
-
-
-def as_simple_kanbanik_task(topic, gerrit):
+def as_simple_kanbanik_task(topic, gerrit, provide_project, provide_workflowitem_id):
     res = {
        'name': sanitize_string(topic),
-       'description': '',
-       'workflowitemId': '576d2494e4b0f885a18fffa1',
+       'description': 'Task for topic: ' + str(topic),
+       'workflowitemId': provide_workflowitem_id(None),
        'version': 1,
-       'projectId': find_mapping_with_default(config['gerrit2kanbanikMappings']['userSpecificMappings'], str(gerrit['owner']['_account_id']))['projectId'],
+       'projectId': provide_project(gerrit),
        'boardId': config['kanbanik']['boardId'],
        'classOfService': to_class_of_service(gerrit),
        'sessionId': sessionId,
        'order': 0
     }
 
-    return res
-
-
-def as_kanbanik_task(gerrit):
-    res = {
-       'name': sanitize_string(gerrit['subject']),
-       'description': '$GERRIT-ID;'+ gerrit['id']  +';TIMESTAMP;'+ gerrit['updated'] +'$',
-       'workflowitemId': to_workflowitem_id(gerrit),
-       'version': 1,
-       'projectId': find_mapping_with_default(config['gerrit2kanbanikMappings']['userSpecificMappings'], str(gerrit['owner']['_account_id']))['projectId'],
-       'boardId': config['kanbanik']['boardId'],
-       'classOfService': to_class_of_service(gerrit),
-       'sessionId': sessionId,
-       'order': 0
-    }
-
+    add_topic_as_tag(res, gerrit)
     add_assignee(res, gerrit)
-    add_tags(res, gerrit)
-
     return res
-
-
-def move_kanbanik_to_unknown(kanbanik):
-    current_workflowitem = kanbanik[1]['workflowitemId']
-    already_in_changed = current_workflowitem  in [v for k, v in config["gerrit2kanbanikMappings"]['owner']["workflowitem2doneMapping"].items()]
-
-    if already_in_changed:
-        return None
-
-    next_workflowitem = find_mapping_with_default(config["gerrit2kanbanikMappings"]['owner']["workflowitem2doneMapping"], current_workflowitem)
-
-    kanbanik[1]['workflowitemId'] = next_workflowitem
-    return {
-        'commandName': 'moveTask',
-        'task': kanbanik[1],
-        'sessionId': sessionId
-    }
-
-
-def find_changed_task(gerrit_task, managed_kanbanik_tasks, force_update):
-    for kanbanik_task in managed_kanbanik_tasks:
-        if kanbanik_task[0][0] == gerrit_task['id'] and (kanbanik_task[0][1] != gerrit_task['updated'] or force_update):
-            return kanbanik_task[1]
-        elif kanbanik_task[0][0] == gerrit_task['id']:
-            return None
-    return None
-
 
 def parse_bz_ids_from_gerrit_commit(msg):
     match_obj = re.findall('.*Bug-Url.*[=//]([0-9]+).*\n', msg, re.I|re.MULTILINE)
@@ -357,8 +251,8 @@ def get_tag_color(ciscore, color, cscore, gerrit, vscore):
     return color
 
 
-def edit_tags(kanbanik_task, change_id, gerrits):
-    names = ['xg: %i' % len(gerrits)]
+def edit_tags(kanbanik_task, change_id, gerrits, tag_unique_part):
+    names = [tag_unique_part + ' ' + str(len(gerrits))]
     description = [change_id + ': ']
 
     color = 'green'
@@ -372,6 +266,8 @@ def edit_tags(kanbanik_task, change_id, gerrits):
         scores_string = '(v: %s, cr: %s, ci: %s)' % (verified, cr, ci)
         names.append(scores_string)
         description.append(str(gerrit['_number']) + '->' + scores_string + ', ')
+        updated = gerrit['updated'].split('.', 1)[0]
+        updated_date = datetime.strptime(updated, '%Y-%m-%d %H:%M:%S')
 
     name = ' '.join(names)
     url = config['gerrit']['url'] + '/#/q/' + change_id
@@ -405,8 +301,7 @@ def edit_tags(kanbanik_task, change_id, gerrits):
 
     return update_kanbanik
 
-def do_synchronize_with_bz(all_gerrit_data, force_update = False):
-    kanbanik_tasks = load_data_from_kanbanik()
+def do_synchronize_with_bz(all_gerrit_data, kanbanik_tasks, force_update = False):
     bz_to_gerrit_tasks = parse_provided_id_from_gerrit_tasks(all_gerrit_data, parse_provided_ids_from_gerrit_task, parse_bz_ids_from_gerrit_commit)[1]
     bzid_to_kanbanik_task = as_bzid_to_kanbanik_task(kanbanik_tasks)
 
@@ -418,7 +313,7 @@ def do_synchronize_with_bz(all_gerrit_data, force_update = False):
         gerrit_groupped_by_changeid = parse_provided_id_from_gerrit_tasks(gerrit_tasks, parse_provided_ids_from_gerrit_task, parse_change_id_from_gerrit_commit)[1]
         to_update = False
         for change_id, gerrit_tasks in gerrit_groupped_by_changeid.items():
-            if edit_tags(kanbanik_task, change_id, gerrit_tasks):
+            if edit_tags(kanbanik_task, change_id, gerrit_tasks, 'xg:'):
                 to_update = True
 
         # if at least one change happened
@@ -431,14 +326,14 @@ def do_synchronize_with_bz(all_gerrit_data, force_update = False):
 
 def parse_topic_from_gerrit(gerrit):
     if 'topic' not in gerrit:
-        return []
+        return [gerrit['subject']]
 
     return [gerrit['topic']]
 
 
-def parse_topic_from_kanbanik(kanbanik_task):
+def parse_topic_from_kanbanik(kanbanik_task, tag_unique_part):
     for tag in kanbanik_task['taskTags']:
-        if tag['name'].startswith('xt:'):
+        if tag['name'].startswith(tag_unique_part):
             return tag['name'][3:]
     return None
 
@@ -453,62 +348,50 @@ def group_by_user(tasks, extract_user):
 
     return res
 
-def do_synchronize_standalone(all_gerrit_data, force_update = False):
-    loaded_kanbanik_tasks = load_data_from_kanbanik()
-
-    # {kanbanik user id -> [kanbanik tasks]}
-    kanbanik_tasks_by_user = group_by_user([task for task in loaded_kanbanik_tasks if 'assignee' in task], lambda task: task['assignee']['userName'])
-
-    # {kanbanik user id -> [gerrit task]}
-    for user_id, gerrits_of_user in group_by_user(all_gerrit_data, lambda task: as_kanbanik_user_name(task)).iteritems():
-
+def do_synchronize_standalone_one(user_id, gerrits_of_user, kanbanik_tasks_by_user, tag_unique_part, provide_project, provide_workflowitem_id):
         # [(topic -> [gerrit tasks])]
         gerrit_data = parse_provided_id_from_gerrit_tasks(gerrits_of_user, lambda task, parser: parser(task), parse_topic_from_gerrit)[1]
 
         # {topic -> kanbanik task}
-        managed_kanbanik_tasks = dict([(parse_topic_from_kanbanik(task), task) for task in kanbanik_tasks_by_user[user_id] if parse_topic_from_kanbanik(task) is not None])
+        managed_kanbanik_tasks = {}
+        if user_id in kanbanik_tasks_by_user:
+            managed_kanbanik_tasks = dict([(parse_topic_from_kanbanik(task, tag_unique_part), task) for task in kanbanik_tasks_by_user[user_id] if parse_topic_from_kanbanik(task, tag_unique_part) is not None])
 
         for topic, gerrit_tasks in gerrit_data.iteritems():
             if topic not in managed_kanbanik_tasks:
                 # create new taks
-                kanbanik_task = as_simple_kanbanik_task(topic, gerrit_tasks[0])
+                active_gerrit_tasks = [task for task in gerrit_tasks if task['status'] != 'MERGED' and task['status'] != 'ABANDONED']
+                if len(active_gerrit_tasks) == 0:
+                    # stop managing old merged tasks
+                    continue
+                kanbanik_task = as_simple_kanbanik_task(topic, gerrit_tasks[0], provide_project, provide_workflowitem_id)
             else:
                 kanbanik_task = managed_kanbanik_tasks[topic]
+                kanbanik_task['workflowitemId'] = provide_workflowitem_id(kanbanik_task)
 
 
             gerrit_groupped_by_changeid = parse_provided_id_from_gerrit_tasks(gerrit_tasks, parse_provided_ids_from_gerrit_task, parse_change_id_from_gerrit_commit)[1]
             to_update = False
             for change_id, gerrit_tasks in gerrit_groupped_by_changeid.items():
-                if edit_tags(kanbanik_task, change_id, gerrit_tasks):
+                if edit_tags(kanbanik_task, change_id, gerrit_tasks, tag_unique_part):
                     to_update = True
 
             # if at least one change happened or something has been added
             if to_update:
-                kanbanik_task['description'] = sanitize_string(kanbanik_task['description'])
+                if 'description' in kanbanik_task:
+                    kanbanik_task['description'] = sanitize_string(kanbanik_task['description'])
                 kanbanik_task['commandName'] = 'editTask'
                 kanbanik_task['sessionId'] = sessionId
                 execute_kanbanik_command(kanbanik_task)
 
-    # add new tasks
-    # for gerrit_topic, gerrit_tasks in gerrit_data:
-    #     if gerrit_topic not in managed_kanbanik_tasks:
-    #
-    #
-    #
-    # to_add = [gerrit_task_to_add_command(gerrit_task)
-    #           for gerrit_task in gerrit_data if gerrit_task['id'] not in managed_task_ids and gerrit_task['status'] != 'MERGED' and gerrit_task['status'] != 'ABANDONED']
-    # for task_to_add in to_add:
-    #     execute_kanbanik_command(task_to_add)
-    #
-    # # update existing
-    # to_edit = [gerrit_task_to_edit_command(gerrit_task, managed_kanbanik_tasks, force_update) for gerrit_task in gerrit_data if find_changed_task(gerrit_task, managed_kanbanik_tasks, force_update) is not None]
-    # for task_to_edit in to_edit:
-    #     for one_command in task_to_edit:
-    #         execute_kanbanik_command(one_command)
-    #
-    # # move out disappeared
-    # gerrit_task_ids = [gerrit_task['id'] for gerrit_task in gerrit_data]
-    # [execute_kanbanik_command(move_kanbanik_to_unknown(kanbanik_task)) for kanbanik_task in managed_kanbanik_tasks if kanbanik_task[0][0] not in gerrit_task_ids]
+def do_synchronize_standalone(all_gerrit_data, kanbanik_tasks_by_user, force_update = False):
+    # {kanbanik user id -> [gerrit task]}
+    for user_id, gerrits_of_user in group_by_user(all_gerrit_data, lambda task: as_kanbanik_user_name(task)).iteritems():
+        active_gerrits = [gerrit for gerrit in gerrits_of_user if gerrit['status'] != 'MERGED' and gerrit['status'] != 'ABANDONED']
+        do_synchronize_standalone_one(user_id, active_gerrits, kanbanik_tasks_by_user, 'xg',
+                                      lambda gerrit: find_mapping_with_default(config['gerrit2kanbanikMappings']['userSpecificMappings'], str(gerrit['owner']['_account_id']))['projectId'],
+                                      lambda kanbanik: config['gerrit2kanbanikMappings']['owner']['workflowitemId']
+                                      )
 
 
 def sanitize_string(s):
@@ -516,6 +399,34 @@ def sanitize_string(s):
     with_correct_enters = "<br>".join(without_non_ascii.split("\n"))
     without_json_special_chars = re.sub(r'"', '\'', with_correct_enters)
     return urllib.quote_plus(without_json_special_chars)
+
+
+def do_synchronize_reviewer(kanbanik_tasks_by_user, reviewer_gerrit_data):
+    # {kanbanikUserName -> gerrit_user_id}
+    reverse_user_mapping = {}
+    for key, value in config['gerrit2kanbanikMappings']['userSpecificMappings'].iteritems():
+        reverse_user_mapping[value['kanbanikName']] = key
+
+    def provide_project(kanbanik_name):
+        return lambda gerrit: \
+            config['gerrit2kanbanikMappings']['userSpecificMappings'][reverse_user_mapping[kanbanik_name]]['projectId'] \
+                if kanbanik_name in reverse_user_mapping \
+                else config['gerrit2kanbanikMappings']['userSpecificMappings']['default']['projectId']
+
+    def provide_workflowitem_id(kanbanik):
+        if kanbanik is None:
+            return config['gerrit2kanbanikMappings']['reviewer']['backlogId']
+        elif kanbanik['workflowitemId'] in config['gerrit2kanbanikMappings']['reviewer']['allowedTransitions']:
+            return config['gerrit2kanbanikMappings']['reviewer']['allowedTransitions'][kanbanik['workflowitemId']]
+        else:
+            kanbanik['workflowitemId']
+
+    for reviewer_data in reviewer_gerrit_data:
+        kanbanik_name = find_mapping_with_default(config['gerrit2kanbanikMappings']['user2kanbanikUser'],
+                                                  reviewer_data[0][0])
+        do_synchronize_standalone_one(kanbanik_name, reviewer_data[1], kanbanik_tasks_by_user, 'xgr:',
+                                      provide_project(kanbanik_name),
+                                      provide_workflowitem_id)
 
 
 def synchronize(kanbanik_pass, config_file):
@@ -535,16 +446,28 @@ def synchronize(kanbanik_pass, config_file):
 
     try:
         logging.info("going to process")
-        # gerrit_data = load_data_from_gerrit()
+        witout_user = [data[1] for data in load_data_from_gerrit('owner', GERRIT_NUM_OF_USERS_SLICE, False)]
+        gerrit_data = [item for sublist in witout_user for item in sublist]
 
+        loaded_kanbanik_tasks = load_data_from_kanbanik()
+
+        # {kanbanik user id -> [kanbanik tasks]}
+        kanbanik_tasks_by_user = group_by_user([task for task in loaded_kanbanik_tasks if 'assignee' in task], lambda task: task['assignee']['userName'])
+
+        # do_synchronize_with_bz(gerrit_data, loaded_kanbanik_tasks, False)
+        # do_synchronize_standalone(gerrit_data, kanbanik_tasks_by_user, False)
+
+        # [([userid], [gerrit tasks])]
+        reviewer_gerrit_data = load_data_from_gerrit('reviewer', 1, True)
         # with open('/tmp/data.txt', 'w') as outfile:
-        #     json.dump(gerrit_data, outfile)
+        #     json.dump(reviewer_gerrit_data, outfile)
 
-        with open('/tmp/data.txt') as data_file:
-            gerrit_data = json.load(data_file)
+        # with open('/tmp/data.txt') as data_file:
+        #     gerrit_data = json.load(data_file)
 
-        # do_synchronize_with_bz(gerrit_data, False)
-        do_synchronize_standalone(gerrit_data, False)
+
+        do_synchronize_reviewer(kanbanik_tasks_by_user, reviewer_gerrit_data)
+
         logging.info("process ended successfully")
     finally:
         try:
@@ -554,7 +477,6 @@ def synchronize(kanbanik_pass, config_file):
 
 
 if __name__ == "__main__":
-# ok, the handling of the cmd line is a pain, needs to be fixed soon
     config_file = None
     kanbanik_pass = None
 
