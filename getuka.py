@@ -4,7 +4,6 @@ import re
 import os.path
 import urllib
 import logging
-from datetime import datetime
 import sys
 import getopt
 
@@ -94,8 +93,8 @@ def as_kanbanik_user_name(gerrit):
     return find_mapping_with_default(config['gerrit2kanbanikMappings']['userSpecificMappings'], str(gerrit['owner']['_account_id']))['kanbanikName']
 
 
-def add_assignee(kanbanik, gerrit):
-    name = as_kanbanik_user_name(gerrit)
+def add_assignee(kanbanik, gerrit, provide_assignee):
+    name = provide_assignee(gerrit)
     kanbanik['assignee'] = {'userName': name, 'realName': 'fake', 'pictureUrl': 'fake', 'sessionId': 'fake', 'version': 1}
 
 
@@ -143,7 +142,7 @@ def can_be_merged(gerrit):
     return crcore == 2 and vscore == 1 and ciscore == 1
 
 
-def as_simple_kanbanik_task(topic, gerrit, provide_project, provide_workflowitem_id):
+def as_simple_kanbanik_task(topic, gerrit, provide_project, provide_workflowitem_id, provide_assignee):
     res = {
        'name': sanitize_string(topic),
        'description': 'Task for topic: ' + str(topic),
@@ -157,7 +156,7 @@ def as_simple_kanbanik_task(topic, gerrit, provide_project, provide_workflowitem
     }
 
     add_topic_as_tag(res, gerrit)
-    add_assignee(res, gerrit)
+    add_assignee(res, gerrit, provide_assignee)
     return res
 
 def parse_bz_ids_from_gerrit_commit(msg):
@@ -220,8 +219,6 @@ def gerrit_score_as_string(gerrit, label):
         else:
             return ', '.join(cleared_scores), max(scores)
 
-
-# returns true if something has changed, otherwise false
 def get_tag_color(ciscore, color, cscore, gerrit, vscore):
     if gerrit['status'] == u'MERGED' or gerrit['status'] == u'ABANDONED':
         color = 'teal'
@@ -263,11 +260,10 @@ def edit_tags(kanbanik_task, change_id, gerrits, tag_unique_part):
 
         color = get_tag_color(ciscore, color, cscore, gerrit, vscore)
 
-        scores_string = '(v: %s, cr: %s, ci: %s)' % (verified, cr, ci)
+        updated = gerrit['updated'].split('.', 1)[0]
+        scores_string = '(v: %s, cr: %s, ci: %s, u: %s)' % (verified, cr, ci, updated)
         names.append(scores_string)
         description.append(str(gerrit['_number']) + '->' + scores_string + ', ')
-        updated = gerrit['updated'].split('.', 1)[0]
-        updated_date = datetime.strptime(updated, '%Y-%m-%d %H:%M:%S')
 
     name = ' '.join(names)
     url = config['gerrit']['url'] + '/#/q/' + change_id
@@ -284,7 +280,7 @@ def edit_tags(kanbanik_task, change_id, gerrits, tag_unique_part):
         if tag['description'].startswith(change_id + ':'):
             add_needed = False
 
-            if new_tag == tag:
+            if tag['description'] == new_tag['description']:
                 return False
             else:
                 new_tags.append(new_tag)
@@ -331,9 +327,9 @@ def parse_topic_from_gerrit(gerrit):
     return [gerrit['topic']]
 
 
-def parse_topic_from_kanbanik(kanbanik_task, tag_unique_part):
+def parse_topic_from_kanbanik(kanbanik_task):
     for tag in kanbanik_task['taskTags']:
-        if tag['name'].startswith(tag_unique_part):
+        if tag['name'].startswith('xt:'):
             return tag['name'][3:]
     return None
 
@@ -348,14 +344,14 @@ def group_by_user(tasks, extract_user):
 
     return res
 
-def do_synchronize_standalone_one(user_id, gerrits_of_user, kanbanik_tasks_by_user, tag_unique_part, provide_project, provide_workflowitem_id):
+def do_synchronize_standalone_one(user_id, gerrits_of_user, kanbanik_tasks_by_user, tag_unique_part, provide_project, provide_workflowitem_id, provide_assignee):
         # [(topic -> [gerrit tasks])]
         gerrit_data = parse_provided_id_from_gerrit_tasks(gerrits_of_user, lambda task, parser: parser(task), parse_topic_from_gerrit)[1]
 
         # {topic -> kanbanik task}
         managed_kanbanik_tasks = {}
         if user_id in kanbanik_tasks_by_user:
-            managed_kanbanik_tasks = dict([(parse_topic_from_kanbanik(task, tag_unique_part), task) for task in kanbanik_tasks_by_user[user_id] if parse_topic_from_kanbanik(task, tag_unique_part) is not None])
+            managed_kanbanik_tasks = dict([(parse_topic_from_kanbanik(task), task) for task in kanbanik_tasks_by_user[user_id] if parse_topic_from_kanbanik(task) is not None])
 
         for topic, gerrit_tasks in gerrit_data.iteritems():
             if topic not in managed_kanbanik_tasks:
@@ -364,7 +360,8 @@ def do_synchronize_standalone_one(user_id, gerrits_of_user, kanbanik_tasks_by_us
                 if len(active_gerrit_tasks) == 0:
                     # stop managing old merged tasks
                     continue
-                kanbanik_task = as_simple_kanbanik_task(topic, gerrit_tasks[0], provide_project, provide_workflowitem_id)
+                kanbanik_task = as_simple_kanbanik_task(topic, gerrit_tasks[0], provide_project, provide_workflowitem_id, provide_assignee)
+
             else:
                 kanbanik_task = managed_kanbanik_tasks[topic]
                 kanbanik_task['workflowitemId'] = provide_workflowitem_id(kanbanik_task)
@@ -390,7 +387,8 @@ def do_synchronize_standalone(all_gerrit_data, kanbanik_tasks_by_user, force_upd
         active_gerrits = [gerrit for gerrit in gerrits_of_user if gerrit['status'] != 'MERGED' and gerrit['status'] != 'ABANDONED']
         do_synchronize_standalone_one(user_id, active_gerrits, kanbanik_tasks_by_user, 'xg',
                                       lambda gerrit: find_mapping_with_default(config['gerrit2kanbanikMappings']['userSpecificMappings'], str(gerrit['owner']['_account_id']))['projectId'],
-                                      lambda kanbanik: config['gerrit2kanbanikMappings']['owner']['workflowitemId']
+                                      lambda kanbanik: config['gerrit2kanbanikMappings']['owner']['workflowitemId'],
+                                      as_kanbanik_user_name
                                       )
 
 
@@ -419,14 +417,18 @@ def do_synchronize_reviewer(kanbanik_tasks_by_user, reviewer_gerrit_data):
         elif kanbanik['workflowitemId'] in config['gerrit2kanbanikMappings']['reviewer']['allowedTransitions']:
             return config['gerrit2kanbanikMappings']['reviewer']['allowedTransitions'][kanbanik['workflowitemId']]
         else:
-            kanbanik['workflowitemId']
+            return kanbanik['workflowitemId']
 
     for reviewer_data in reviewer_gerrit_data:
         kanbanik_name = find_mapping_with_default(config['gerrit2kanbanikMappings']['user2kanbanikUser'],
                                                   reviewer_data[0][0])
-        do_synchronize_standalone_one(kanbanik_name, reviewer_data[1], kanbanik_tasks_by_user, 'xgr:',
+
+        # if the same user is both reviewer and owner, the reviewer is going to be ignored
+        only_reviewer = [gerrit for gerrit in reviewer_data[1] if as_kanbanik_user_name(gerrit) != kanbanik_name]
+        do_synchronize_standalone_one(kanbanik_name, only_reviewer, kanbanik_tasks_by_user, 'xgr:',
                                       provide_project(kanbanik_name),
-                                      provide_workflowitem_id)
+                                      provide_workflowitem_id,
+                                      lambda g: kanbanik_name)
 
 
 def synchronize(kanbanik_pass, config_file):
@@ -454,17 +456,16 @@ def synchronize(kanbanik_pass, config_file):
         # {kanbanik user id -> [kanbanik tasks]}
         kanbanik_tasks_by_user = group_by_user([task for task in loaded_kanbanik_tasks if 'assignee' in task], lambda task: task['assignee']['userName'])
 
-        # do_synchronize_with_bz(gerrit_data, loaded_kanbanik_tasks, False)
-        # do_synchronize_standalone(gerrit_data, kanbanik_tasks_by_user, False)
+        do_synchronize_with_bz(gerrit_data, loaded_kanbanik_tasks, False)
+        do_synchronize_standalone(gerrit_data, kanbanik_tasks_by_user, False)
 
         # [([userid], [gerrit tasks])]
-        reviewer_gerrit_data = load_data_from_gerrit('reviewer', 1, True)
+        # reviewer_gerrit_data = load_data_from_gerrit('reviewer', 1, True)
         # with open('/tmp/data.txt', 'w') as outfile:
         #     json.dump(reviewer_gerrit_data, outfile)
 
-        # with open('/tmp/data.txt') as data_file:
-        #     gerrit_data = json.load(data_file)
-
+        with open('/home/tjelinek/work/workspaces/kanbanik/integration/data.txt') as data_file:
+            reviewer_gerrit_data = json.load(data_file)
 
         do_synchronize_reviewer(kanbanik_tasks_by_user, reviewer_gerrit_data)
 
